@@ -1,45 +1,31 @@
 /**
- * Persistence layer with two tiers:
+ * Persistence layer — two modes:
  *
- *  1. File System Access API — saves to a real .json file the user chooses.
- *     The FileSystemFileHandle is kept across sessions in IndexedDB so the app
- *     can re-open the file automatically on the next load.
+ *  Tauri desktop (IS_TAURI = true):
+ *    Reads and writes $APPDATA/LedgerOS/data.json directly via the
+ *    native file system.  No user dialogs, no IndexedDB, no localStorage
+ *    overhead.  In-memory React state is the hot cache; the file is the
+ *    single source of truth.
  *
- *  2. localStorage fallback — used on browsers that don't support the File
- *     System Access API (Firefox, Safari < 15.2) and as a fast in-browser
- *     cache for the initial synchronous render.
- *
- * Every write goes to localStorage first (synchronous, instant) and then to
- * the linked file asynchronously. This means the app always starts instantly
- * from localStorage, and the JSON file is the portable, human-readable record.
+ *  Browser fallback (IS_TAURI = false):
+ *    Two-tier: localStorage (fast sync) + File System Access API
+ *    (portable JSON file chosen by the user, Chrome/Edge only).
  */
 import type { AppData } from './types';
 import { seedData } from './seed';
 
-// ─── localStorage ────────────────────────────────────────────────────────────
+// ─── Environment detection ────────────────────────────────────────────────────
 
-export const STORAGE_KEY = 'ledgeros.data';
-const LEGACY_KEY = 'ledgeros.v2';
+/** True when running inside the Tauri desktop wrapper. */
+export const IS_TAURI: boolean =
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+// ─── Shared ───────────────────────────────────────────────────────────────────
+
 export const SCHEMA = 1;
-
 export type StorageState = 'ok' | 'file' | 'unavailable' | 'full';
 
-interface Envelope {
-  schema: number;
-  data: AppData;
-}
-
-function getStore(): Storage | null {
-  try {
-    const s = window.localStorage;
-    const probe = '__ledgeros_probe__';
-    s.setItem(probe, '1');
-    s.removeItem(probe);
-    return s;
-  } catch {
-    return null;
-  }
-}
+const FILE_TAG = 'ledger-os';
 
 /** Fill any fields missing from older or hand-edited saves with defaults. */
 export function normalize(raw: unknown): AppData | null {
@@ -50,17 +36,80 @@ export function normalize(raw: unknown): AppData | null {
   const ob = (r.ob && typeof r.ob === 'object' ? r.ob : {}) as Partial<AppData['ob']>;
   const hasSheet = r.sheetData !== false;
   return {
-    txns: arr(r.txns, d.txns),
-    startCash: r.startCash ?? d.startCash,
-    rate: typeof r.rate === 'number' && r.rate > 0 ? r.rate : d.rate,
-    ob: { family: arr(ob.family, d.ob.family), personal: arr(ob.personal, d.ob.personal), subs: arr(ob.subs, d.ob.subs) },
+    txns:       arr(r.txns, d.txns),
+    startCash:  r.startCash ?? d.startCash,
+    rate:       typeof r.rate === 'number' && r.rate > 0 ? r.rate : d.rate,
+    ob: {
+      family:   arr(ob.family,   d.ob.family),
+      personal: arr(ob.personal, d.ob.personal),
+      subs:     arr(ob.subs,     d.ob.subs),
+    },
     portfolios: arr(r.portfolios, d.portfolios),
-    events: hasSheet ? arr(r.events, d.events) : d.events,
-    rules: hasSheet ? arr(r.rules, []) : [],
-    actual: hasSheet && r.actual && typeof r.actual === 'object' ? r.actual : d.actual,
-    buckets: arr(r.buckets, d.buckets),
-    settings: { ...d.settings, ...(r.settings && typeof r.settings === 'object' ? r.settings : {}) },
+    events:     hasSheet ? arr(r.events, d.events) : d.events,
+    rules:      hasSheet ? arr(r.rules, []) : [],
+    actual:     hasSheet && r.actual && typeof r.actual === 'object' ? r.actual : d.actual,
+    buckets:    arr(r.buckets, d.buckets),
+    settings:   { ...d.settings, ...(r.settings && typeof r.settings === 'object' ? r.settings : {}) },
   };
+}
+
+// ─── Tauri FS path ────────────────────────────────────────────────────────────
+
+const TAURI_DIR  = 'LedgerOS';        // relative to $APPDATA
+const TAURI_FILE = 'LedgerOS/data.json';
+
+/** Load AppData from $APPDATA/LedgerOS/data.json (Tauri only). */
+export async function loadDataTauri(): Promise<{ data: AppData; fresh: boolean }> {
+  try {
+    const { BaseDirectory, exists, mkdir, readTextFile } = await import('@tauri-apps/plugin-fs');
+    const bd = BaseDirectory.AppData;
+
+    // Ensure directory exists on first run
+    if (!(await exists(TAURI_DIR, { baseDir: bd }))) {
+      await mkdir(TAURI_DIR, { baseDir: bd, recursive: true });
+    }
+
+    if (!(await exists(TAURI_FILE, { baseDir: bd }))) {
+      return { data: seedData(), fresh: true };
+    }
+
+    const text    = await readTextFile(TAURI_FILE, { baseDir: bd });
+    const json: unknown = JSON.parse(text);
+    const payload = json && typeof json === 'object' && 'data' in (json as object)
+      ? (json as { data: unknown }).data
+      : json;
+    const data = normalize(payload);
+    return data ? { data, fresh: false } : { data: seedData(), fresh: true };
+  } catch {
+    return { data: seedData(), fresh: true };
+  }
+}
+
+/** Write AppData to $APPDATA/LedgerOS/data.json (Tauri only). */
+export async function saveDataTauri(data: AppData): Promise<void> {
+  const { BaseDirectory, writeTextFile } = await import('@tauri-apps/plugin-fs');
+  await writeTextFile(
+    TAURI_FILE,
+    JSON.stringify({ app: FILE_TAG, schema: SCHEMA, savedAt: new Date().toISOString(), data }, null, 2),
+    { baseDir: BaseDirectory.AppData },
+  );
+}
+
+// ─── localStorage ────────────────────────────────────────────────────────────
+
+export const STORAGE_KEY = 'ledgeros.data';
+const LEGACY_KEY         = 'ledgeros.v2';
+
+interface Envelope { schema: number; data: AppData; }
+
+function getStore(): Storage | null {
+  try {
+    const s = window.localStorage;
+    const probe = '__ledgeros_probe__';
+    s.setItem(probe, '1');
+    s.removeItem(probe);
+    return s;
+  } catch { return null; }
 }
 
 export function loadData(): { data: AppData; state: StorageState; fresh: boolean } {
@@ -69,8 +118,7 @@ export function loadData(): { data: AppData; state: StorageState; fresh: boolean
   try {
     const cur = store.getItem(STORAGE_KEY);
     if (cur) {
-      const env = JSON.parse(cur) as Envelope;
-      const data = normalize(env.data);
+      const data = normalize((JSON.parse(cur) as Envelope).data);
       if (data) return { data, state: 'ok', fresh: false };
     }
     const legacy = store.getItem(LEGACY_KEY);
@@ -96,7 +144,7 @@ export function saveData(data: AppData): StorageState {
   }
 }
 
-/** Calls back when another tab of this browser saves new data. */
+/** Calls back when another browser tab saves new data. */
 export function onExternalChange(cb: (data: AppData) => void): () => void {
   const handler = (e: StorageEvent) => {
     if (e.key !== STORAGE_KEY || !e.newValue) return;
@@ -116,7 +164,7 @@ export function requestPersistence() {
 
 export function downloadBackup(data: AppData) {
   const blob = new Blob(
-    [JSON.stringify({ app: 'ledger-os', schema: SCHEMA, exportedAt: new Date().toISOString(), data }, null, 2)],
+    [JSON.stringify({ app: FILE_TAG, schema: SCHEMA, exportedAt: new Date().toISOString(), data }, null, 2)],
     { type: 'application/json' },
   );
   const a = document.createElement('a');
@@ -135,43 +183,28 @@ export async function readBackup(file: File): Promise<AppData> {
   return data;
 }
 
-// ─── File System Access API ───────────────────────────────────────────────────
+// ─── File System Access API (browser, Chrome/Edge only) ──────────────────────
 
-/** Minimal typings for the File System Access API (not yet in all TS DOM libs). */
 interface SaveFilePicker {
-  (opts?: {
-    suggestedName?: string;
-    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-    excludeAcceptAllOption?: boolean;
-  }): Promise<FileSystemFileHandle>;
+  (opts?: { suggestedName?: string; types?: Array<{ description?: string; accept: Record<string, string[]> }>; excludeAcceptAllOption?: boolean }): Promise<FileSystemFileHandle>;
 }
 interface OpenFilePicker {
-  (opts?: {
-    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-    multiple?: boolean;
-    excludeAcceptAllOption?: boolean;
-  }): Promise<FileSystemFileHandle[]>;
+  (opts?: { types?: Array<{ description?: string; accept: Record<string, string[]> }>; multiple?: boolean; excludeAcceptAllOption?: boolean }): Promise<FileSystemFileHandle[]>;
 }
-
 declare global {
-  interface Window {
-    showSaveFilePicker?: SaveFilePicker;
-    showOpenFilePicker?: OpenFilePicker;
-  }
+  interface Window { showSaveFilePicker?: SaveFilePicker; showOpenFilePicker?: OpenFilePicker; }
 }
 
-/** True when the browser supports native file save/open dialogs. */
 export function supportsFileAccess(): boolean {
-  return typeof window !== 'undefined' &&
+  return !IS_TAURI &&
+    typeof window !== 'undefined' &&
     typeof window.showSaveFilePicker === 'function' &&
     typeof window.showOpenFilePicker === 'function';
 }
 
-// ─── IndexedDB handle store ───────────────────────────────────────────────────
+// ─── IndexedDB handle store (browser only) ───────────────────────────────────
 
-const IDB_NAME = 'ledgeros-fs';
-const IDB_STORE = 'handles';
-const IDB_KEY = 'saveFile';
+const IDB_NAME = 'ledgeros-fs', IDB_STORE = 'handles', IDB_KEY = 'saveFile';
 
 function openIDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -182,7 +215,6 @@ function openIDB(): Promise<IDBDatabase> {
   });
 }
 
-/** Retrieve the previously-stored FileSystemFileHandle from IndexedDB. */
 export async function getSavedHandle(): Promise<FileSystemFileHandle | null> {
   try {
     const db = await openIDB();
@@ -190,12 +222,11 @@ export async function getSavedHandle(): Promise<FileSystemFileHandle | null> {
       const tx = db.transaction(IDB_STORE, 'readonly');
       const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
       req.onsuccess = () => resolve((req.result as FileSystemFileHandle) ?? null);
-      req.onerror = () => resolve(null);
+      req.onerror  = () => resolve(null);
     });
   } catch { return null; }
 }
 
-/** Persist (or clear) a FileSystemFileHandle in IndexedDB. */
 export async function storeHandle(handle: FileSystemFileHandle | null): Promise<void> {
   try {
     const db = await openIDB();
@@ -205,65 +236,41 @@ export async function storeHandle(handle: FileSystemFileHandle | null): Promise<
       if (handle) store.put(handle, IDB_KEY);
       else store.delete(IDB_KEY);
       tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.onerror    = () => reject(tx.error);
     });
-  } catch { /* ignore — file handle storage is best-effort */ }
+  } catch { /* best-effort */ }
 }
 
-// ─── File read / write ────────────────────────────────────────────────────────
+// ─── File read / write (browser) ─────────────────────────────────────────────
 
-const FILE_ENVELOPE_TAG = 'ledger-os';
-
-/** Read and parse AppData from a FileSystemFileHandle. */
 export async function readFromHandle(handle: FileSystemFileHandle): Promise<AppData | null> {
   try {
-    const file = await handle.getFile();
-    const text = await file.text();
+    const text = await (await handle.getFile()).text();
     const json: unknown = JSON.parse(text);
-    const payload =
-      json && typeof json === 'object' && 'data' in (json as object)
-        ? (json as { data: unknown }).data
-        : json;
+    const payload = json && typeof json === 'object' && 'data' in (json as object)
+      ? (json as { data: unknown }).data : json;
     return normalize(payload);
   } catch { return null; }
 }
 
-/** Write AppData to a FileSystemFileHandle as a human-readable JSON file. */
 export async function writeToHandle(handle: FileSystemFileHandle, data: AppData): Promise<void> {
   const writable = await handle.createWritable();
   await writable.write(
-    JSON.stringify(
-      { app: FILE_ENVELOPE_TAG, schema: SCHEMA, savedAt: new Date().toISOString(), data },
-      null,
-      2,
-    ),
+    JSON.stringify({ app: FILE_TAG, schema: SCHEMA, savedAt: new Date().toISOString(), data }, null, 2),
   );
   await writable.close();
 }
 
-// ─── Picker helpers ───────────────────────────────────────────────────────────
-
 const FILE_TYPES = [{ description: 'Ledger OS data', accept: { 'application/json': ['.json'] } }];
 
-/**
- * Show a "Save File" dialog and return the chosen handle.
- * Returns null if the user cancelled or the API is unavailable.
- */
 export async function promptNewSaveFile(): Promise<FileSystemFileHandle | null> {
   if (!window.showSaveFilePicker) return null;
-  try {
-    return await window.showSaveFilePicker({ suggestedName: 'ledger-os-data.json', types: FILE_TYPES });
-  } catch { return null; /* user cancelled */ }
+  try { return await window.showSaveFilePicker({ suggestedName: 'ledger-os-data.json', types: FILE_TYPES }); }
+  catch { return null; }
 }
 
-/**
- * Show an "Open File" dialog and return the chosen handle.
- * Returns null if the user cancelled or the API is unavailable.
- */
 export async function promptOpenSaveFile(): Promise<FileSystemFileHandle | null> {
   if (!window.showOpenFilePicker) return null;
-  try {
-    const [handle] = await window.showOpenFilePicker({ types: FILE_TYPES, multiple: false });
-    return handle;
-  } catch { return null; /* user cancelled */ }
+  try { const [h] = await window.showOpenFilePicker({ types: FILE_TYPES, multiple: false }); return h; }
+  catch { return null; }
 }

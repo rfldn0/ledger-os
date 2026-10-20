@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppData } from './types';
+import { seedData } from './seed';
 import {
+  IS_TAURI,
   getSavedHandle,
   loadData,
+  loadDataTauri,
   onExternalChange,
   promptNewSaveFile,
   promptOpenSaveFile,
   readFromHandle,
   requestPersistence,
   saveData,
+  saveDataTauri,
   storeHandle,
   supportsFileAccess,
   writeToHandle,
@@ -18,24 +22,37 @@ import {
 export type Update = (fn: (d: AppData) => AppData) => void;
 
 /**
- * App data with two-tier persistence:
- *  - localStorage  (synchronous, fast, always-on fallback)
- *  - JSON file     (File System Access API — portable, human-readable)
+ * App data with auto-persistence.
  *
- * On mount the hook tries to restore a previously-linked file handle from
- * IndexedDB and, if found, loads the data from the file.  Every subsequent
- * change is debounced ~150 ms and written to both tiers.
+ * Tauri mode (desktop):
+ *   Starts with blank seed data, then immediately loads the real data from
+ *   $APPDATA/LedgerOS/data.json (< 10 ms on local disk).  Every subsequent
+ *   change is debounced 100 ms then written directly to that file.
+ *   In-memory React state is the hot cache — reads are always instant.
+ *
+ * Browser mode (fallback):
+ *   localStorage (sync) + File System Access API (portable JSON file).
  */
 export function useLedger() {
-  const [init] = useState(loadData);
-  const [data, setData]       = useState<AppData>(init.data);
-  const [storage, setStorage] = useState<StorageState>(init.state);
-  const [savedAt, setSavedAt] = useState<Date | null>(init.fresh ? null : new Date());
+  // ── Initial state ─────────────────────────────────────────────────────────
+  // Tauri: seed placeholder so App never sees null; real data arrives via effect.
+  // Browser: load from localStorage synchronously (instant).
+  const [init] = useState(() =>
+    IS_TAURI
+      ? { data: seedData(), state: 'file' as StorageState, fresh: true }
+      : loadData()
+  );
 
-  // File handle state — keep a ref alongside the state value so the flush
-  // callbacks always see the current handle without stale closure issues.
+  // True only during the brief async Tauri file read on first mount (~5-20 ms)
+  const [isLoading, setIsLoading] = useState(IS_TAURI);
+
+  const [data,    setData]    = useState<AppData>(init.data);
+  const [storage, setStorage] = useState<StorageState>(IS_TAURI ? 'file' : init.state);
+  const [savedAt, setSavedAt] = useState<Date | null>(IS_TAURI ? null : (init.fresh ? null : new Date()));
+
+  // ── File handle (browser mode only) ──────────────────────────────────────
   const [fileHandle, setFileHandleState] = useState<FileSystemFileHandle | null>(null);
-  const [fileName,   setFileName]        = useState<string | null>(null);
+  const [fileName,   setFileName]        = useState<string | null>(IS_TAURI ? 'data.json' : null);
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
 
   const setFileHandle = useCallback((h: FileSystemFileHandle | null) => {
@@ -44,14 +61,30 @@ export function useLedger() {
     setFileName(h ? h.name : null);
   }, []);
 
-  const external  = useRef(false);
-  const latest    = useRef(data);
-  const dirty     = useRef(init.fresh); // write seed/blank data on very first run
-  latest.current  = data;
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const external     = useRef(false); // true = change came from another tab
+  const tauriLoading = useRef(false); // true = async initial load in progress
+  const latest       = useRef<AppData>(data);
+  const dirty        = useRef(!IS_TAURI && init.fresh);
+  latest.current     = data;
 
-  // ── Restore file handle from IndexedDB on mount ─────────────────────────────
+  // ── Tauri: load from file on mount ────────────────────────────────────────
   useEffect(() => {
-    if (!supportsFileAccess()) return;
+    if (!IS_TAURI) return;
+    loadDataTauri().then(({ data: fileData, fresh }) => {
+      tauriLoading.current = true; // suppress the next debounce tick
+      setData(fileData);
+      setSavedAt(fresh ? null : new Date());
+      setStorage('file');
+      dirty.current = false;
+      setIsLoading(false);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Browser: restore File System file handle from IndexedDB on mount ──────
+  useEffect(() => {
+    if (IS_TAURI || !supportsFileAccess()) return;
     getSavedHandle().then(async handle => {
       if (!handle) return;
       const fileData = await readFromHandle(handle);
@@ -62,23 +95,21 @@ export function useLedger() {
         setStorage('file');
         dirty.current = false;
       } else {
-        // Handle is stale (file moved/deleted) — remove it.
-        await storeHandle(null);
+        await storeHandle(null); // handle is stale (file moved/deleted)
       }
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Save helpers ─────────────────────────────────────────────────────────────
+  // ── Save helpers ──────────────────────────────────────────────────────────
 
-  /** Synchronous localStorage save — always runs first so the app is never left unsaved. */
+  /** Synchronous localStorage write — browser mode only. */
   const flushLocal = useCallback(() => {
     const st = saveData(latest.current);
-    // Only surface localStorage errors when there is no file taking over.
     if (!fileHandleRef.current) setStorage(st);
   }, []);
 
-  /** Async file write — runs after flushLocal. */
+  /** Async File System API write — browser mode only. */
   const flushFile = useCallback(async () => {
     const handle = fileHandleRef.current;
     if (!handle) return;
@@ -87,53 +118,64 @@ export function useLedger() {
       setStorage('file');
       setSavedAt(new Date());
     } catch {
-      // File write failed (e.g. permission revoked) — fall back to localStorage status.
       setStorage(saveData(latest.current));
     }
+  }, []);
+
+  /** Async native FS write — Tauri mode. */
+  const flushTauri = useCallback(async () => {
+    try {
+      await saveDataTauri(latest.current);
+      setStorage('file');
+      setSavedAt(new Date());
+    } catch { /* best-effort; file retried on next change */ }
   }, []);
 
   const flush = useCallback(() => {
     if (!dirty.current) return;
     dirty.current = false;
-    flushLocal();
-    if (!fileHandleRef.current) setSavedAt(new Date());
-    void flushFile();
-  }, [flushLocal, flushFile]);
+    if (IS_TAURI) {
+      void flushTauri();
+    } else {
+      flushLocal();
+      if (!fileHandleRef.current) setSavedAt(new Date());
+      void flushFile();
+    }
+  }, [flushTauri, flushLocal, flushFile]);
 
-  // Debounce: save ~150 ms after the last change.
+  // ── Debounce: write 100 ms after last change ──────────────────────────────
   useEffect(() => {
-    if (external.current) { external.current = false; return; }
+    if (external.current)     { external.current = false; return; }
+    if (tauriLoading.current) { tauriLoading.current = false; return; }
+
     dirty.current = true;
-    const t = setTimeout(flush, 150);
+    const t = setTimeout(flush, 100);
     return () => clearTimeout(t);
   }, [data, flush]);
 
-  // Force-save on tab hide / page unload (localStorage only — async file write
-  // can't reliably complete before the page is killed).
+  // ── Force-save on tab hide / page unload (browser mode only) ─────────────
   useEffect(() => {
+    if (IS_TAURI) return;
     requestPersistence();
-    const off   = onExternalChange(d => { external.current = true; setData(d); setSavedAt(new Date()); });
+    const off    = onExternalChange(d => { external.current = true; setData(d); setSavedAt(new Date()); });
     const onHide = () => { if (dirty.current) { dirty.current = false; flushLocal(); } };
     const onVis  = () => { if (document.visibilityState === 'hidden') onHide(); };
-    window.addEventListener('pagehide',        onHide);
+    window.addEventListener('pagehide',           onHide);
     document.addEventListener('visibilitychange', onVis);
     return () => {
       off();
-      window.removeEventListener('pagehide',        onHide);
+      window.removeEventListener('pagehide',           onHide);
       document.removeEventListener('visibilitychange', onVis);
     };
   }, [flushLocal]);
 
-  // ── Public API ───────────────────────────────────────────────────────────────
+  // ── Public API ────────────────────────────────────────────────────────────
 
-  const update:  Update = useCallback(fn => setData(fn), []);
+  const update:  Update = useCallback(fn => setData(d => fn(d)), []);
   const replace          = useCallback((d: AppData) => setData(d), []);
 
-  /**
-   * Prompt the user to choose a location for a new save file.
-   * Writes current data immediately then switches all future saves to that file.
-   */
   const linkFile = useCallback(async () => {
+    if (IS_TAURI) return;
     const handle = await promptNewSaveFile();
     if (!handle) return;
     await writeToHandle(handle, latest.current);
@@ -143,11 +185,8 @@ export function useLedger() {
     setSavedAt(new Date());
   }, [setFileHandle]);
 
-  /**
-   * Prompt the user to open an existing Ledger OS JSON file.
-   * Loads its data, then routes all future saves to that file.
-   */
   const openFile = useCallback(async () => {
+    if (IS_TAURI) return;
     const handle = await promptOpenSaveFile();
     if (!handle) return;
     const fileData = await readFromHandle(handle);
@@ -160,18 +199,25 @@ export function useLedger() {
     dirty.current = false;
   }, [setFileHandle]);
 
-  /** Detach the linked file and revert to localStorage-only persistence. */
   const unlinkFile = useCallback(async () => {
+    if (IS_TAURI) return;
     await storeHandle(null);
     setFileHandle(null);
     setStorage(saveData(latest.current) === 'ok' ? 'ok' : 'unavailable');
   }, [setFileHandle]);
 
   return {
-    data, update, replace,
-    storage, savedAt,
-    fileHandle, fileName,
-    linkFile, openFile, unlinkFile,
+    data,
+    isLoading,
+    update,
+    replace,
+    storage,
+    savedAt,
+    fileHandle,
+    fileName,
+    linkFile,
+    openFile,
+    unlinkFile,
     canUseFiles: supportsFileAccess(),
   };
 }

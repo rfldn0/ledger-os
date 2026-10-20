@@ -39,8 +39,8 @@ export function Header({ tab, onTab, rate, onRate, storage, savedAt, fileName, c
         <div className="row ml-auto wrap" style={{ gap: 14, alignItems: 'center' }}>
           {/* ── Save status ─────────────────────────────────── */}
           {storage === 'file' && time && (
-            <span className="small" title={`Saved to file: ${fileName ?? ''}`}>
-              ● file {fileName ? <em style={{ fontStyle: 'normal', opacity: 0.7 }}>{fileName}</em> : null} {time}
+            <span className="small mono" title={fileName ? `Auto-saved to ${fileName}` : 'Auto-saved'} style={{ opacity: 0.8 }}>
+              ● {fileName ?? 'saved'} {time}
             </span>
           )}
           {storage === 'ok' && !fileName && time && (

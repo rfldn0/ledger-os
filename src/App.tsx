@@ -20,7 +20,7 @@ function initialTab(): Tab {
 }
 
 export function App() {
-  const { data, update, replace, storage, savedAt, fileName, linkFile, openFile, unlinkFile, canUseFiles } = useLedger();
+  const { data, isLoading, update, replace, storage, savedAt, fileName, linkFile, openFile, unlinkFile, canUseFiles } = useLedger();
   const [tab, setTab] = useState<Tab>(initialTab);
   const [fb, setFb] = useState<Feedback>({ toast: null, lastId: null, burstKey: 0 });
   const [over, setOver] = useState<OverInfo | null>(null);
@@ -67,6 +67,9 @@ export function App() {
       window.alert("That file isn't a Ledger OS backup.");
     }
   };
+
+  // Tauri: show nothing for the ~10 ms while the file loads from disk
+  if (isLoading) return <main className="page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }} />;
 
   return (
     <main className="page">
