@@ -33,13 +33,12 @@ interface Props {
   onExportBackup: () => void;
   onImportBackup: (f: File) => void;
   onClearEntries: () => void;
-  onRestore: () => void;
   onDelete: (id: string) => void;
 }
 
 const fmtD = (d: Date) => `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, '0')}`;
 
-export function Ledger({ data, update, filter, setFilter, lastId, onExportBackup, onImportBackup, onClearEntries, onRestore, onDelete }: Props) {
+export function Ledger({ data, update, filter, setFilter, lastId, onExportBackup, onImportBackup, onClearEntries, onDelete }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [more, setMore] = useState(false);
@@ -137,7 +136,6 @@ export function Ledger({ data, update, filter, setFilter, lastId, onExportBackup
               onChange={e => { const f = e.target.files?.[0]; if (f) onImportBackup(f); e.target.value = ''; }} />
             <span className="row wrap ml-auto" style={{ gap: 8 }}>
               <button className="chip" onClick={exportCsv}>Export CSV</button>
-              <button className="chip" onClick={onRestore}>Restore sheet data</button>
               <button className="chip danger" onClick={onClearEntries}>Clear entries</button>
             </span>
           </div>

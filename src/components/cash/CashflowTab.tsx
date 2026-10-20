@@ -2,7 +2,6 @@ import { useState } from 'react';
 import type { AppData, Txn } from '../../lib/types';
 import type { Update } from '../../lib/useLedger';
 import { obTotals } from '../../lib/calc';
-import { seedTxns } from '../../lib/seed';
 import { inRange, money, num, range } from '../../lib/util';
 import { Modal } from '../Modal';
 import { Blocks } from '../Sprites';
@@ -57,8 +56,7 @@ export function CashflowTab({ data, update, feedback, over, onCommit, onUndo, on
       <Readouts txns={data.txns} payAnchor={data.settings.payAnchor} />
       <Ledger data={data} update={update} filter={filter} setFilter={setFilter} lastId={feedback.lastId}
         onExportBackup={onExportBackup} onImportBackup={onImportBackup} onDelete={onDelete}
-        onClearEntries={() => { if (window.confirm('Clear all cashflow entries? Obligations, timesheet and buckets are kept.')) update(d => ({ ...d, txns: [] })); }}
-        onRestore={() => { if (window.confirm('Replace the ledger with your Recurring sheet data?')) update(d => ({ ...d, txns: seedTxns() })); }} />
+        onClearEntries={() => { if (window.confirm('Clear all cashflow entries? Obligations, timesheet and buckets are kept.')) update(d => ({ ...d, txns: [] })); }} />
 
       {over && (
         <Modal onClose={() => onCloseOver(false)} label="Over budget" maxWidth={420}>

@@ -12,9 +12,14 @@ interface Props {
   onRate: (r: number) => void;
   storage: StorageState;
   savedAt: Date | null;
+  fileName: string | null;
+  canUseFiles: boolean;
+  onLinkFile: () => void;
+  onOpenFile: () => void;
+  onUnlinkFile: () => void;
 }
 
-export function Header({ tab, onTab, rate, onRate, storage, savedAt }: Props) {
+export function Header({ tab, onTab, rate, onRate, storage, savedAt, fileName, canUseFiles, onLinkFile, onOpenFile, onUnlinkFile }: Props) {
   const [rateText, setRateText] = useState(String(rate));
   useEffect(() => setRateText(String(rate)), [rate]);
   const time = savedAt ? savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
@@ -31,8 +36,44 @@ export function Header({ tab, onTab, rate, onRate, storage, savedAt }: Props) {
             </button>
           ))}
         </nav>
-        <div className="row ml-auto wrap" style={{ gap: 14 }}>
-          {storage === 'ok' && time && <span className="small" title="Saved in this browser's local storage">● saved on this device {time}</span>}
+        <div className="row ml-auto wrap" style={{ gap: 14, alignItems: 'center' }}>
+          {/* ── Save status ─────────────────────────────────── */}
+          {storage === 'file' && time && (
+            <span className="small" title={`Saved to file: ${fileName ?? ''}`}>
+              ● file {fileName ? <em style={{ fontStyle: 'normal', opacity: 0.7 }}>{fileName}</em> : null} {time}
+            </span>
+          )}
+          {storage === 'ok' && !fileName && time && (
+            <span className="small" title="Saved in this browser's local storage">● saved on this device {time}</span>
+          )}
+
+          {/* ── File link buttons (File System Access API only) ── */}
+          {canUseFiles && (
+            <span className="row" style={{ gap: 6 }}>
+              {fileName ? (
+                <button className="chip" style={{ fontSize: 12, padding: '2px 10px', opacity: 0.75 }}
+                  title="Unlink the save file and revert to device-only storage"
+                  onClick={onUnlinkFile}>
+                  unlink file
+                </button>
+              ) : (
+                <>
+                  <button className="chip" style={{ fontSize: 12, padding: '2px 10px' }}
+                    title="Choose where to save your data as a JSON file"
+                    onClick={onLinkFile}>
+                    link file
+                  </button>
+                  <button className="chip" style={{ fontSize: 12, padding: '2px 10px' }}
+                    title="Open an existing Ledger OS JSON file"
+                    onClick={onOpenFile}>
+                    open file
+                  </button>
+                </>
+              )}
+            </span>
+          )}
+
+          {/* ── Exchange rate ────────────────────────────────── */}
           <label className="row mono" style={{ gap: 6, fontSize: 13 }}>1$ =
             <input className="field-u mono" type="number" inputMode="numeric" value={rateText} aria-label="Rupiah per dollar"
               onChange={e => { setRateText(e.target.value); const v = +e.target.value; if (v >= 1) onRate(v); }}

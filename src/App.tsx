@@ -20,7 +20,7 @@ function initialTab(): Tab {
 }
 
 export function App() {
-  const { data, update, replace, storage, savedAt } = useLedger();
+  const { data, update, replace, storage, savedAt, fileName, linkFile, openFile, unlinkFile, canUseFiles } = useLedger();
   const [tab, setTab] = useState<Tab>(initialTab);
   const [fb, setFb] = useState<Feedback>({ toast: null, lastId: null, burstKey: 0 });
   const [over, setOver] = useState<OverInfo | null>(null);
@@ -70,7 +70,10 @@ export function App() {
 
   return (
     <main className="page">
-      <Header tab={tab} onTab={setTab} rate={data.rate} onRate={r => update(d => ({ ...d, rate: r }))} storage={storage} savedAt={savedAt} />
+      <Header tab={tab} onTab={setTab} rate={data.rate} onRate={r => update(d => ({ ...d, rate: r }))}
+        storage={storage} savedAt={savedAt}
+        fileName={fileName} canUseFiles={canUseFiles}
+        onLinkFile={linkFile} onOpenFile={openFile} onUnlinkFile={unlinkFile} />
       {tab === 'cash' && (
         <CashflowTab data={data} update={update} feedback={fb} over={over}
           onCommit={commit} onUndo={() => fb.lastId && remove(fb.lastId)} onDelete={remove}
